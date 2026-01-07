@@ -1,0 +1,18 @@
+[package]
+name = "smbclient-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Windows SMB/Samba client library for Rust"
+authors = ["sgnay <sgnay@outlook.com>"]
+license = "MIT"
+
+[dependencies]
+thiserror = "2.0.17"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_NetManagement",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
+] }
