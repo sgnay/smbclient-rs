@@ -74,3 +74,57 @@ pub enum Error {
     #[error("Unknown error.")]
     Other,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display() {
+        // Test that all error variants have proper display messages
+        assert_eq!(Error::AccessDenied.to_string(), "The caller does not have access to the network resource.");
+        assert_eq!(Error::AlreadyAssigned.to_string(), "The local device specified by the lpLocalName member is already connected to a network resource.");
+        assert_eq!(Error::BadDevType.to_string(), "The type of local device and the type of network resource do not match.");
+        assert!(Error::BadDevice.to_string().contains("The specified device name is not valid."));
+        assert!(Error::BadNetName.to_string().contains("The network name cannot be found."));
+        assert_eq!(Error::BadProfile.to_string(), "The user profile is in an incorrect format.");
+        assert!(Error::BadProvider.to_string().contains("The specified network provider name is not valid."));
+        assert_eq!(Error::BadUsername.to_string(), "The specified user name is not valid.");
+        assert_eq!(Error::Busy.to_string(), "The router or provider is busy, possibly initializing. The caller should retry.");
+        assert!(Error::Cancelled.to_string().contains("The attempt to make the connection was canceled"));
+        assert_eq!(Error::CannotOpenProfile.to_string(), "The system is unable to open the user profile to process persistent connections.");
+        assert!(Error::DeviceAlreadyRemembered.to_string().contains("The local device name has a remembered connection"));
+        assert!(Error::ExtendedError.to_string().contains("A network-specific error occurred."));
+        assert!(Error::InvalidAddress.to_string().contains("An attempt was made to access an invalid address."));
+        assert!(Error::InvalidParameter.to_string().contains("A parameter is incorrect."));
+        assert!(Error::InvalidPassword.to_string().contains("The specified password is invalid"));
+        assert_eq!(Error::LogonFailure.to_string(), "A logon failure because of an unknown user name or a bad password.");
+        assert!(Error::NoNetOrBadPath.to_string().contains("No network provider accepted the given network path."));
+        assert_eq!(Error::NoNetwork.to_string(), "The network is unavailable.");
+        assert_eq!(Error::DeviceInUse.to_string(), "The device is in use by an active process and cannot be disconnected.");
+        assert!(Error::NotConnected.to_string().contains("The name specified by the lpName parameter is not a redirected device"));
+        assert_eq!(Error::OpenFiles.to_string(), "There are open files, and the fForce parameter is FALSE.");
+        assert_eq!(Error::Other.to_string(), "Unknown error.");
+    }
+
+    #[test]
+    fn test_error_partial_eq() {
+        // Test that error variants can be compared
+        assert_eq!(Error::AccessDenied, Error::AccessDenied);
+        assert_ne!(Error::AccessDenied, Error::BadDevType);
+        
+        // Test that different variants are not equal
+        assert_ne!(Error::Busy, Error::Cancelled);
+        assert_ne!(Error::NoNetwork, Error::Other);
+    }
+
+    #[test]
+    fn test_error_debug() {
+        // Test that Debug trait works
+        let debug_output = format!("{:?}", Error::AccessDenied);
+        assert!(debug_output.contains("AccessDenied"));
+        
+        let debug_output = format!("{:?}", Error::Other);
+        assert!(debug_output.contains("Other"));
+    }
+}

@@ -1,15 +1,44 @@
-use smbclient_rs::SmbShare;
+use smbclient_rs::{NetworkConnection, SmbShare};
+
+fn print_connection_table(connections: &[NetworkConnection]) {
+    if connections.is_empty() {
+        println!("No network connections found.");
+        return;
+    }
+
+    println!("Found {} network connection(s):", connections.len());
+    println!("{}", "=".repeat(100));
+    println!(
+        "{:<10} {:<30} {:<15} {:<30}",
+        "Local", "Remote", "Type", "Provider"
+    );
+    println!("{}", "-".repeat(100));
+
+    for conn in connections {
+        let local_display = if conn.local_name.is_empty() {
+            "(UNC)".to_string()
+        } else {
+            conn.local_name.clone()
+        };
+
+        println!(
+            "{:<10} {:<30} {:<15} {:<30}",
+            local_display, conn.remote_name, conn.connection_type, conn.provider_name
+        );
+    }
+
+    println!("{}", "=".repeat(100));
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() < 5 {
-        eprintln!("Usage: {} <server> <share> <username> <password>", args[0]);
-        eprintln!("Example: {} 192.168.1.100 myshare user pass", args[0]);
-        eprintln!(
-            "Example: {} localhost IPC$ \"\" \"\" (anonymous access)",
-            args[0]
-        );
+    if args.len() < 2 {
+        eprintln!("Usage:");
+        eprintln!("  {} <server> <share> <username> <password>", args[0]);
+        eprintln!("Examples:");
+        eprintln!("  {} 192.168.1.100 myshare user pass", args[0]);
+        eprintln!("  {} localhost IPC$ \"\" \"\" (anonymous access)", args[0]);
         std::process::exit(1);
     }
 
@@ -68,6 +97,17 @@ fn main() {
         }
         Err(e) => {
             eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    match SmbShare::list_connect_unc() {
+        Ok(connections) => {
+            println!("Listing all network connections in the system...\n");
+            print_connection_table(&connections);
+        }
+        Err(e) => {
+            eprintln!("Error listing network connections: {}", e);
             std::process::exit(1);
         }
     }
