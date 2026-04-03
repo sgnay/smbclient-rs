@@ -16,9 +16,9 @@ fn print_connection_table(connections: &[NetworkConnection]) {
 
     for conn in connections {
         let local_display = if conn.local_name.is_empty() {
-            "(UNC)".to_string()
+            "(UNC)"
         } else {
-            conn.local_name.clone()
+            &conn.local_name
         };
 
         println!(
@@ -33,12 +33,39 @@ fn print_connection_table(connections: &[NetworkConnection]) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() < 2 {
-        eprintln!("Usage:");
-        eprintln!("  {} <server> <share> <username> <password>", args[0]);
-        eprintln!("Examples:");
-        eprintln!("  {} 192.168.1.100 myshare user pass", args[0]);
-        eprintln!("  {} localhost IPC$ \"\" \"\" (anonymous access)", args[0]);
+    // Check for help flag
+    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
+        println!("smbclient-rs - Windows SMB/Samba client tool");
+        println!();
+        println!("Usage:");
+        println!("  {} <server> <share> <username> <password>", args[0]);
+        println!();
+        println!("Arguments:");
+        println!("  <server>    Server address (e.g., 192.168.1.100 or localhost)");
+        println!("  <share>     Share resource name (e.g., myshare or IPC$)");
+        println!("  <username>  Username for authentication (use \"\" for anonymous)");
+        println!("  <password>  Password for authentication (use \"\" for anonymous)");
+        println!();
+        println!("Examples:");
+        println!("  {} 192.168.1.100 myshare user pass", args[0]);
+        println!("  {} localhost IPC$ \"\" \"\" (anonymous access)", args[0]);
+        println!();
+        println!("Options:");
+        println!("  -h, --help  Show this help message");
+        println!();
+        println!("Tool workflow:");
+        println!("  1. Connect to the specified SMB share");
+        println!("  2. List all shares on the server");
+        println!("  3. Display all network connections in the system");
+        println!("  4. Disconnect from the share");
+        return;
+    }
+
+    if args.len() < 5 {
+        eprintln!("Error: Insufficient arguments");
+        eprintln!();
+        eprintln!("Usage: {} <server> <share> <username> <password>", args[0]);
+        eprintln!("For more information, use: {} --help", args[0]);
         std::process::exit(1);
     }
 
@@ -103,7 +130,7 @@ fn main() {
 
     match SmbShare::list_connect_unc() {
         Ok(connections) => {
-            println!("Listing all network connections in the system...\n");
+            println!("Listing all network connections in the system ...\n");
             print_connection_table(&connections);
         }
         Err(e) => {

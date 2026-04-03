@@ -14,6 +14,24 @@ A Windows SMB/Samba client library for Rust, providing easy-to-use APIs for conn
 - Enumerate system network connections
 - Support for interactive credential input
 
+## Performance Considerations
+
+The library includes several performance optimizations:
+
+### Buffer Reuse
+- **String buffer reuse**: In `list_connect_unc()` method, a pre-allocated buffer is reused for formatting connection types, avoiding frequent heap allocations
+- **Memory efficiency**: Uses `write!` macro with buffer reuse instead of `format!` in loops to minimize memory allocations
+
+### Safe Error Handling
+- **No panics**: Avoids `unwrap()` calls in performance-critical paths with safe error handling
+- **Graceful degradation**: Formatting failures return default values instead of panicking
+
+### Efficient Memory Management
+- **Pre-sized buffers**: Network enumeration uses dynamically resizing buffers starting from 16KB
+- **Zero-copy operations**: Uses string slices where possible to avoid unnecessary cloning
+
+These optimizations are particularly important when enumerating large numbers of network connections, where traditional string formatting could cause significant performance overhead.
+
 ## Installation
 
 Add this to your `Cargo.toml`:
@@ -174,10 +192,16 @@ Main error types include:
 
 ## Command Line Tool
 
-The package includes a command-line tool for testing connections:
+The package includes a command-line tool for testing SMB connections. The tool performs the following workflow:
+1. Connect to the specified SMB share
+2. List all shares on the server
+3. Display all network connections in the system
+4. Disconnect from the share
+
+### Usage
 
 ```bash
-# Basic usage
+# Basic usage with authentication
 cargo run -- <server> <share> <username> <password>
 
 # Example with authentication
@@ -188,13 +212,61 @@ cargo run -- localhost IPC$ "" ""
 
 # Show help
 cargo run -- --help
+# or
+cargo run -- -h
 ```
 
-Tool features:
-1. Connect to the specified SMB share
-2. List all shares on the server
-3. Display all network connections in the system
-4. Disconnect
+### Help Output
+
+```
+smbclient-rs - Windows SMB/Samba client tool
+
+Usage:
+  smbclient-rs <server> <share> <username> <password>
+
+Arguments:
+  <server>    Server address (e.g., 192.168.1.100 or localhost)
+  <share>     Share resource name (e.g., myshare or IPC$)
+  <username>  Username for authentication (use "" for anonymous)
+  <password>  Password for authentication (use "" for anonymous)
+
+Examples:
+  smbclient-rs 192.168.1.100 myshare user pass
+  smbclient-rs localhost IPC$ "" "" (anonymous access)
+
+Options:
+  -h, --help  Show this help message
+
+Tool workflow:
+  1. Connect to the specified SMB share
+  2. List all shares on the server
+  3. Display all network connections in the system
+  4. Disconnect from the share
+```
+
+### Building the Tool
+
+You can also build a standalone executable:
+
+```bash
+# Build in debug mode
+cargo build
+
+# Build in release mode
+cargo build --release
+
+# The executable will be available at:
+# Debug: target/debug/smbclient-rs.exe
+# Release: target/release/smbclient-rs.exe
+```
+
+### Running the Built Executable
+
+```bash
+# Using the built executable
+./target/debug/smbclient-rs.exe --help
+./target/debug/smbclient-rs.exe localhost IPC$ "" ""
+```
 
 ## Requirements
 

@@ -3,7 +3,7 @@ pub use error::{Error, Result};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
-use windows::Win32::Foundation::{WIN32_ERROR, HANDLE, ERROR_NO_MORE_ITEMS, ERROR_MORE_DATA};
+use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, HANDLE, WIN32_ERROR};
 use windows::Win32::NetworkManagement::{
     NetManagement::NetApiBufferFree,
     WNet::{self, NET_CONNECT_FLAGS, NETRESOURCEW},
@@ -306,15 +306,17 @@ impl SmbShare {
     /// * `Ok(Vec<NetworkConnection>)` - List of network connections on success
     /// * `Err(Error)` - Enumeration failed with specific error
     pub fn list_connect_unc() -> Result<Vec<NetworkConnection>> {
+        use std::fmt::Write;
+
         let mut enum_handle: HANDLE = HANDLE(std::ptr::null_mut());
-        
+
         // Open enumeration for connected resources only
         let open_result = unsafe {
             WNet::WNetOpenEnumW(
                 WNet::RESOURCE_CONNECTED, // Only enumerate connected resources
                 WNet::RESOURCETYPE_ANY,
                 WNet::WNET_OPEN_ENUM_USAGE(0), // 0 = all resources
-                None, // lpNetResource = None for all resources
+                None,                          // lpNetResource = None for all resources
                 &mut enum_handle,
             )
         };
@@ -326,10 +328,11 @@ impl SmbShare {
         let mut connections = Vec::new();
         let mut buffer_size = 16384u32; // 16KB buffer
         let mut buffer: Vec<u8> = vec![0; buffer_size as usize];
-        
+        let mut type_buf = String::with_capacity(32); // 预分配缓冲区用于连接类型
+
         loop {
             let mut count = u32::MAX;
-            
+
             let enum_result = unsafe {
                 WNet::WNetEnumResourceW(
                     enum_handle,
@@ -345,44 +348,55 @@ impl SmbShare {
                     if count == 0 {
                         break; // No more resources
                     }
-                    
+
                     unsafe {
                         let resources = std::slice::from_raw_parts(
                             buffer.as_ptr() as *const NETRESOURCEW,
                             count as usize,
                         );
-                        
+
                         for resource in resources {
                             let local_name = if resource.lpLocalName.is_null() {
                                 String::new()
                             } else {
                                 wide_to_string(resource.lpLocalName.0 as *mut u16)
                             };
-                            
+
                             let remote_name = if resource.lpRemoteName.is_null() {
                                 String::new()
                             } else {
                                 wide_to_string(resource.lpRemoteName.0 as *mut u16)
                             };
-                            
+
+                            type_buf.clear();
                             let connection_type = match resource.dwType {
-                                WNet::RESOURCETYPE_DISK => "disk".to_string(),
-                                WNet::RESOURCETYPE_PRINT => "print".to_string(),
-                                _ => format!("unknown ({})", resource.dwType.0),
+                                WNet::RESOURCETYPE_DISK => "disk",
+                                WNet::RESOURCETYPE_PRINT => "print",
+                                _ => {
+                                    // 只有在未知类型时才使用格式化
+                                    // 安全处理：如果格式化失败，使用默认值
+                                    if write!(&mut type_buf, "unknown ({})", resource.dwType.0)
+                                        .is_err()
+                                    {
+                                        "unknown"
+                                    } else {
+                                        &type_buf
+                                    }
+                                }
                             };
-                            
+
                             let provider_name = if resource.lpProvider.is_null() {
                                 String::new()
                             } else {
                                 wide_to_string(resource.lpProvider.0 as *mut u16)
                             };
-                            
+
                             // Only add connections that are actually connected
                             if !remote_name.is_empty() {
                                 connections.push(NetworkConnection {
                                     local_name,
                                     remote_name,
-                                    connection_type,
+                                    connection_type: connection_type.to_string(),
                                     provider_name,
                                 });
                             }
@@ -400,18 +414,21 @@ impl SmbShare {
                 }
                 _ => {
                     // Some other error
-                    unsafe { let _ = WNet::WNetCloseEnum(enum_handle); }
+                    unsafe {
+                        let _ = WNet::WNetCloseEnum(enum_handle);
+                    }
                     return map_win32_error(enum_result).map(|_| Vec::new());
                 }
             }
         }
-        
+
         // Close the enumeration handle
-        unsafe { let _ = WNet::WNetCloseEnum(enum_handle); }
-        
+        unsafe {
+            let _ = WNet::WNetCloseEnum(enum_handle);
+        }
+
         Ok(connections)
     }
-
 }
 
 #[cfg(test)]
@@ -464,11 +481,11 @@ mod tests {
     fn test_to_wide() {
         let wide = to_wide("test");
         assert_eq!(wide, vec![116, 101, 115, 116, 0]);
-        
+
         // Test empty string
         let wide_empty = to_wide("");
         assert_eq!(wide_empty, vec![0]);
-        
+
         // Test Unicode string
         let wide_unicode = to_wide("test🎉");
         // "t"=116, "e"=101, "s"=115, "t"=116, "🎉"=0xD83C 0xDF89, null=0
@@ -488,17 +505,17 @@ mod tests {
         // Test with null pointer (should return empty string)
         let result = unsafe { wide_to_string(std::ptr::null_mut()) };
         assert_eq!(result, "");
-        
+
         // Test with valid UTF-16 data
         let wide_data: Vec<u16> = vec![116, 101, 115, 116, 0]; // "test"
         let result = unsafe { wide_to_string(wide_data.as_ptr() as *mut u16) };
         assert_eq!(result, "test");
-        
+
         // Test with empty string
         let wide_empty: Vec<u16> = vec![0];
         let result = unsafe { wide_to_string(wide_empty.as_ptr() as *mut u16) };
         assert_eq!(result, "");
-        
+
         // Test with Unicode
         let wide_unicode: Vec<u16> = vec![0xD83C, 0xDF89, 0]; // "🎉"
         let result = unsafe { wide_to_string(wide_unicode.as_ptr() as *mut u16) };
@@ -509,42 +526,109 @@ mod tests {
     fn test_map_win32_error() {
         use windows::Win32::Foundation::{
             ERROR_ACCESS_DENIED, ERROR_ALREADY_ASSIGNED, ERROR_BAD_DEV_TYPE, ERROR_BAD_DEVICE,
-            ERROR_BAD_NET_NAME, ERROR_BAD_PROFILE, ERROR_BAD_PROVIDER, ERROR_BAD_USERNAME, ERROR_BUSY,
-            ERROR_CANCELLED, ERROR_CANNOT_OPEN_PROFILE, ERROR_DEVICE_ALREADY_REMEMBERED,
-            ERROR_DEVICE_IN_USE, ERROR_EXTENDED_ERROR, ERROR_INVALID_ADDRESS, ERROR_INVALID_PARAMETER,
-            ERROR_INVALID_PASSWORD, ERROR_LOGON_FAILURE, ERROR_NO_NET_OR_BAD_PATH, ERROR_NO_NETWORK,
-            ERROR_NOT_CONNECTED, ERROR_OPEN_FILES, NO_ERROR,
+            ERROR_BAD_NET_NAME, ERROR_BAD_PROFILE, ERROR_BAD_PROVIDER, ERROR_BAD_USERNAME,
+            ERROR_BUSY, ERROR_CANCELLED, ERROR_CANNOT_OPEN_PROFILE,
+            ERROR_DEVICE_ALREADY_REMEMBERED, ERROR_DEVICE_IN_USE, ERROR_EXTENDED_ERROR,
+            ERROR_INVALID_ADDRESS, ERROR_INVALID_PARAMETER, ERROR_INVALID_PASSWORD,
+            ERROR_LOGON_FAILURE, ERROR_NO_NET_OR_BAD_PATH, ERROR_NO_NETWORK, ERROR_NOT_CONNECTED,
+            ERROR_OPEN_FILES, NO_ERROR,
         };
-        
+
         // Test NO_ERROR
         assert!(map_win32_error(NO_ERROR).is_ok());
-        
+
         // Test various error codes
-        assert_eq!(map_win32_error(ERROR_ACCESS_DENIED).unwrap_err(), Error::AccessDenied);
-        assert_eq!(map_win32_error(ERROR_ALREADY_ASSIGNED).unwrap_err(), Error::AlreadyAssigned);
-        assert_eq!(map_win32_error(ERROR_BAD_DEV_TYPE).unwrap_err(), Error::BadDevType);
-        assert_eq!(map_win32_error(ERROR_BAD_DEVICE).unwrap_err(), Error::BadDevice);
-        assert_eq!(map_win32_error(ERROR_BAD_NET_NAME).unwrap_err(), Error::BadNetName);
-        assert_eq!(map_win32_error(ERROR_BAD_PROFILE).unwrap_err(), Error::BadProfile);
-        assert_eq!(map_win32_error(ERROR_BAD_PROVIDER).unwrap_err(), Error::BadProvider);
-        assert_eq!(map_win32_error(ERROR_BAD_USERNAME).unwrap_err(), Error::BadUsername);
+        assert_eq!(
+            map_win32_error(ERROR_ACCESS_DENIED).unwrap_err(),
+            Error::AccessDenied
+        );
+        assert_eq!(
+            map_win32_error(ERROR_ALREADY_ASSIGNED).unwrap_err(),
+            Error::AlreadyAssigned
+        );
+        assert_eq!(
+            map_win32_error(ERROR_BAD_DEV_TYPE).unwrap_err(),
+            Error::BadDevType
+        );
+        assert_eq!(
+            map_win32_error(ERROR_BAD_DEVICE).unwrap_err(),
+            Error::BadDevice
+        );
+        assert_eq!(
+            map_win32_error(ERROR_BAD_NET_NAME).unwrap_err(),
+            Error::BadNetName
+        );
+        assert_eq!(
+            map_win32_error(ERROR_BAD_PROFILE).unwrap_err(),
+            Error::BadProfile
+        );
+        assert_eq!(
+            map_win32_error(ERROR_BAD_PROVIDER).unwrap_err(),
+            Error::BadProvider
+        );
+        assert_eq!(
+            map_win32_error(ERROR_BAD_USERNAME).unwrap_err(),
+            Error::BadUsername
+        );
         assert_eq!(map_win32_error(ERROR_BUSY).unwrap_err(), Error::Busy);
-        assert_eq!(map_win32_error(ERROR_CANCELLED).unwrap_err(), Error::Cancelled);
-        assert_eq!(map_win32_error(ERROR_CANNOT_OPEN_PROFILE).unwrap_err(), Error::CannotOpenProfile);
-        assert_eq!(map_win32_error(ERROR_DEVICE_ALREADY_REMEMBERED).unwrap_err(), Error::DeviceAlreadyRemembered);
-        assert_eq!(map_win32_error(ERROR_EXTENDED_ERROR).unwrap_err(), Error::ExtendedError);
-        assert_eq!(map_win32_error(ERROR_INVALID_ADDRESS).unwrap_err(), Error::InvalidAddress);
-        assert_eq!(map_win32_error(ERROR_INVALID_PARAMETER).unwrap_err(), Error::InvalidParameter);
-        assert_eq!(map_win32_error(ERROR_INVALID_PASSWORD).unwrap_err(), Error::InvalidPassword);
-        assert_eq!(map_win32_error(ERROR_LOGON_FAILURE).unwrap_err(), Error::LogonFailure);
-        assert_eq!(map_win32_error(ERROR_NO_NET_OR_BAD_PATH).unwrap_err(), Error::NoNetOrBadPath);
-        assert_eq!(map_win32_error(ERROR_NO_NETWORK).unwrap_err(), Error::NoNetwork);
-        assert_eq!(map_win32_error(ERROR_NOT_CONNECTED).unwrap_err(), Error::NotConnected);
-        assert_eq!(map_win32_error(ERROR_OPEN_FILES).unwrap_err(), Error::OpenFiles);
-        assert_eq!(map_win32_error(ERROR_DEVICE_IN_USE).unwrap_err(), Error::DeviceInUse);
-        
+        assert_eq!(
+            map_win32_error(ERROR_CANCELLED).unwrap_err(),
+            Error::Cancelled
+        );
+        assert_eq!(
+            map_win32_error(ERROR_CANNOT_OPEN_PROFILE).unwrap_err(),
+            Error::CannotOpenProfile
+        );
+        assert_eq!(
+            map_win32_error(ERROR_DEVICE_ALREADY_REMEMBERED).unwrap_err(),
+            Error::DeviceAlreadyRemembered
+        );
+        assert_eq!(
+            map_win32_error(ERROR_EXTENDED_ERROR).unwrap_err(),
+            Error::ExtendedError
+        );
+        assert_eq!(
+            map_win32_error(ERROR_INVALID_ADDRESS).unwrap_err(),
+            Error::InvalidAddress
+        );
+        assert_eq!(
+            map_win32_error(ERROR_INVALID_PARAMETER).unwrap_err(),
+            Error::InvalidParameter
+        );
+        assert_eq!(
+            map_win32_error(ERROR_INVALID_PASSWORD).unwrap_err(),
+            Error::InvalidPassword
+        );
+        assert_eq!(
+            map_win32_error(ERROR_LOGON_FAILURE).unwrap_err(),
+            Error::LogonFailure
+        );
+        assert_eq!(
+            map_win32_error(ERROR_NO_NET_OR_BAD_PATH).unwrap_err(),
+            Error::NoNetOrBadPath
+        );
+        assert_eq!(
+            map_win32_error(ERROR_NO_NETWORK).unwrap_err(),
+            Error::NoNetwork
+        );
+        assert_eq!(
+            map_win32_error(ERROR_NOT_CONNECTED).unwrap_err(),
+            Error::NotConnected
+        );
+        assert_eq!(
+            map_win32_error(ERROR_OPEN_FILES).unwrap_err(),
+            Error::OpenFiles
+        );
+        assert_eq!(
+            map_win32_error(ERROR_DEVICE_IN_USE).unwrap_err(),
+            Error::DeviceInUse
+        );
+
         // Test unknown error code
-        assert_eq!(map_win32_error(WIN32_ERROR(9999)).unwrap_err(), Error::Other);
+        assert_eq!(
+            map_win32_error(WIN32_ERROR(9999)).unwrap_err(),
+            Error::Other
+        );
     }
 
     #[test]
@@ -554,8 +638,10 @@ mod tests {
             Ok(connections) => {
                 println!("Found {} network connections:", connections.len());
                 for conn in &connections {
-                    println!("  Local: '{}', Remote: '{}', Type: '{}', Provider: '{}'", 
-                             conn.local_name, conn.remote_name, conn.connection_type, conn.provider_name);
+                    println!(
+                        "  Local: '{}', Remote: '{}', Type: '{}', Provider: '{}'",
+                        conn.local_name, conn.remote_name, conn.connection_type, conn.provider_name
+                    );
                 }
                 // We don't assert anything specific about the number of connections
                 // because it depends on the system state
@@ -576,7 +662,7 @@ mod tests {
             connection_type: "disk".to_string(),
             provider_name: "Microsoft Windows Network".to_string(),
         };
-        
+
         // Test that Debug trait works
         let debug_output = format!("{:?}", conn);
         assert!(debug_output.contains("local_name"));
@@ -596,7 +682,7 @@ mod tests {
             true,
             false,
         );
-        
+
         // Test that Debug trait works
         let debug_output = format!("{:?}", smb);
         assert!(debug_output.contains("server"));
@@ -617,7 +703,7 @@ mod tests {
             false,
             false,
         );
-        
+
         match smb.list_shares() {
             Ok(shares) => {
                 println!("Found {} shares on localhost", shares.len());
@@ -627,7 +713,10 @@ mod tests {
                 // It's OK if this fails on some systems (e.g., no SMB server running)
                 println!("list_shares returned error: {}", e);
                 // Verify it's a valid error type
-                assert!(matches!(e, Error::AccessDenied | Error::BadNetName | Error::NoNetwork | Error::Other));
+                assert!(matches!(
+                    e,
+                    Error::AccessDenied | Error::BadNetName | Error::NoNetwork | Error::Other
+                ));
             }
         }
     }
@@ -643,17 +732,22 @@ mod tests {
             false,
             false,
         );
-        
+
         // Try to connect - this may succeed or fail depending on system configuration
         let connect_result = smb_share.connect_unc();
-        
+
         if let Err(e) = connect_result {
             // Connection failed, which is OK for testing purposes
             println!("Connection failed as expected: {}", e);
             // Verify it's a valid error type
-            assert!(matches!(e, 
-                Error::AccessDenied | Error::BadNetName | Error::NoNetwork | 
-                Error::LogonFailure | Error::InvalidParameter | Error::Other
+            assert!(matches!(
+                e,
+                Error::AccessDenied
+                    | Error::BadNetName
+                    | Error::NoNetwork
+                    | Error::LogonFailure
+                    | Error::InvalidParameter
+                    | Error::Other
             ));
         } else {
             // Connection succeeded, so we should disconnect
@@ -667,6 +761,5 @@ mod tests {
             }
         }
     }
-
 }
-        // Test instance method version
+// Test instance method version
