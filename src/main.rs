@@ -1,4 +1,34 @@
+use clap::Parser;
 use smbclient_rs::{NetworkConnection, SmbShare};
+
+/// Windows SMB/Samba client tool — connect, enumerate, and disconnect SMB shares.
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Server address (e.g. 192.168.1.100 or localhost)
+    server: String,
+
+    /// Share resource name (e.g. myshare or IPC$)
+    share: String,
+
+    /// Username for authentication (empty string for anonymous)
+    username: String,
+
+    /// Password for authentication (empty string for anonymous)
+    password: String,
+
+    /// Map to a drive letter (e.g. Z)
+    #[arg(short, long)]
+    drive: Option<char>,
+
+    /// Persist the connection across sessions
+    #[arg(short, long, default_value_t = false)]
+    persist: bool,
+
+    /// Allow interactive credential input
+    #[arg(short, long, default_value_t = false)]
+    interactive: bool,
+}
 
 fn print_connection_table(connections: &[NetworkConnection]) {
     if connections.is_empty() {
@@ -31,72 +61,30 @@ fn print_connection_table(connections: &[NetworkConnection]) {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Check for help flag
-    if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
-        println!("smbclient-rs - Windows SMB/Samba client tool");
-        println!();
-        println!("Usage:");
-        println!("  {} <server> <share> <username> <password>", args[0]);
-        println!();
-        println!("Arguments:");
-        println!("  <server>    Server address (e.g., 192.168.1.100 or localhost)");
-        println!("  <share>     Share resource name (e.g., myshare or IPC$)");
-        println!("  <username>  Username for authentication (use \"\" for anonymous)");
-        println!("  <password>  Password for authentication (use \"\" for anonymous)");
-        println!();
-        println!("Examples:");
-        println!("  {} 192.168.1.100 myshare user pass", args[0]);
-        println!("  {} localhost IPC$ \"\" \"\" (anonymous access)", args[0]);
-        println!();
-        println!("Options:");
-        println!("  -h, --help  Show this help message");
-        println!();
-        println!("Tool workflow:");
-        println!("  1. Connect to the specified SMB share");
-        println!("  2. List all shares on the server");
-        println!("  3. Display all network connections in the system");
-        println!("  4. Disconnect from the share");
-        return;
-    }
+    println!("Connecting to server: {}", cli.server);
 
-    if args.len() < 5 {
-        eprintln!("Error: Insufficient arguments");
-        eprintln!();
-        eprintln!("Usage: {} <server> <share> <username> <password>", args[0]);
-        eprintln!("For more information, use: {} --help", args[0]);
-        std::process::exit(1);
-    }
-
-    let server = &args[1];
-    let share = &args[2];
-    let username = &args[3];
-    let password = &args[4];
-
-    println!("Connecting to server: {}", server);
-
-    // Convert empty strings to None
-    let username_opt = if username.is_empty() {
+    let username_opt = if cli.username.is_empty() {
         None
     } else {
-        Some(username.to_string())
+        Some(cli.username)
     };
 
-    let password_opt = if password.is_empty() {
+    let password_opt = if cli.password.is_empty() {
         None
     } else {
-        Some(password.to_string())
+        Some(cli.password)
     };
 
     let smb_share = SmbShare::new(
-        server.to_string(),
-        share.to_string(),
+        cli.server,
+        cli.share,
         username_opt,
         password_opt,
-        None,
-        false,
-        false,
+        cli.drive,
+        cli.persist,
+        cli.interactive,
     );
 
     match smb_share.connect_unc() {

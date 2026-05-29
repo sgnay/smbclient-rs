@@ -3,7 +3,9 @@ pub use error::{Error, Result};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
-use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, HANDLE, WIN32_ERROR};
+use windows::Win32::Foundation::{
+    ERROR_EXTENDED_ERROR, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, HANDLE, WIN32_ERROR,
+};
 use windows::Win32::NetworkManagement::{
     NetManagement::NetApiBufferFree,
     WNet::{self, NET_CONNECT_FLAGS, NETRESOURCEW},
@@ -18,8 +20,8 @@ use windows::core::{PCWSTR, PWSTR};
 ///
 /// # Returns
 /// * `Vec<u16>` - UTF-16 encoded string with null terminator
-fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s)
+fn to_wide(s: impl AsRef<str>) -> Vec<u16> {
+    OsStr::new(s.as_ref())
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
@@ -36,7 +38,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 ///
 /// # Returns
 /// * `String` - The converted Rust string, or empty string if pointer is null
-unsafe fn wide_to_string(ptr: *mut u16) -> String {
+unsafe fn wide_to_string(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
     }
@@ -97,7 +99,7 @@ fn map_win32_error(code: WIN32_ERROR) -> Result<()> {
         ERROR_CANCELLED => Err(Error::Cancelled),
         ERROR_CANNOT_OPEN_PROFILE => Err(Error::CannotOpenProfile),
         ERROR_DEVICE_ALREADY_REMEMBERED => Err(Error::DeviceAlreadyRemembered),
-        ERROR_EXTENDED_ERROR => Err(Error::ExtendedError),
+        ERROR_EXTENDED_ERROR => Err(Error::ExtendedError(String::new())),
         ERROR_INVALID_ADDRESS => Err(Error::InvalidAddress),
         ERROR_INVALID_PARAMETER => Err(Error::InvalidParameter),
         ERROR_INVALID_PASSWORD => Err(Error::InvalidPassword),
@@ -107,14 +109,43 @@ fn map_win32_error(code: WIN32_ERROR) -> Result<()> {
         ERROR_NOT_CONNECTED => Err(Error::NotConnected),
         ERROR_OPEN_FILES => Err(Error::OpenFiles),
         ERROR_DEVICE_IN_USE => Err(Error::DeviceInUse),
-        _ => Err(Error::Other),
+        _ => Err(Error::Other(code.0)),
+    }
+}
+
+/// Call `WNetGetLastErrorW` to retrieve extended error information from the
+/// network provider.  This is meant to be used when a WNet function returns
+/// `ERROR_EXTENDED_ERROR`.
+fn get_extended_error_info() -> String {
+    let mut error_code: u32 = 0;
+    // WNetGetLastErrorW requires two mutable u16 slices: one for the
+    // description and one for the provider name.
+    const BUF_SIZE: usize = 1024;
+    let mut err_buf = vec![0u16; BUF_SIZE];
+    let mut name_buf = vec![0u16; BUF_SIZE];
+
+    let result = unsafe { WNet::WNetGetLastErrorW(&mut error_code, &mut err_buf, &mut name_buf) };
+
+    if result != WIN32_ERROR(0) {
+        return format!("WNetGetLastErrorW failed with code {}", result.0);
+    }
+
+    let desc = unsafe { wide_to_string(err_buf.as_ptr()) };
+    let provider = unsafe { wide_to_string(name_buf.as_ptr()) };
+
+    if provider.is_empty() {
+        format!("extended error 0x{:08X}: {}", error_code, desc)
+    } else {
+        format!(
+            "extended error 0x{:08X} (provider '{}'): {}",
+            error_code, provider, desc
+        )
     }
 }
 /// SMB Share connection manager
 ///
 /// This struct provides methods to connect to, disconnect from, and list SMB shares.
 /// It handles Windows SMB/Samba connections using the Windows Networking API.
-#[derive(Debug)]
 pub struct SmbShare {
     server: String,           // Server address
     share: String,            // Share resource name
@@ -123,6 +154,20 @@ pub struct SmbShare {
     driver: Option<char>,     // (Optional) Drive letter
     persist: bool,            // Whether to persist connection
     interactive: bool,        // Whether to interactively input credentials
+}
+
+impl std::fmt::Debug for SmbShare {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmbShare")
+            .field("server", &self.server)
+            .field("share", &self.share)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("driver", &self.driver)
+            .field("persist", &self.persist)
+            .field("interactive", &self.interactive)
+            .finish()
+    }
 }
 
 impl SmbShare {
@@ -136,6 +181,22 @@ impl SmbShare {
     /// * `driver` - Optional drive letter to map the share to (e.g., 'Z')
     /// * `persist` - Whether to persist the connection across sessions
     /// * `interactive` - Whether to allow interactive credential input
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use smbclient_rs::SmbShare;
+    ///
+    /// let smb = SmbShare::new(
+    ///     "192.168.1.100".to_string(),
+    ///     "myshare".to_string(),
+    ///     Some("username"),
+    ///     Some("password"),
+    ///     Some('Z'),
+    ///     false,
+    ///     false,
+    /// );
+    /// ```
     pub fn new(
         server: String,
         share: String,
@@ -162,14 +223,22 @@ impl SmbShare {
     /// * `Ok(Vec<String>)` - List of share names on success
     /// * `Err(Error)` - Error message on failure
     pub fn list_shares(&self) -> Result<Vec<String>> {
-        let server_w = to_wide(&self.server);
+        // For local machine, pass NULL to NetShareEnum instead of server name
+        let server_w;
+        let server_ptr = if self.server.eq_ignore_ascii_case("localhost") {
+            PCWSTR::null()
+        } else {
+            server_w = to_wide(&self.server);
+            PCWSTR(server_w.as_ptr())
+        };
+
         let mut buf: *mut u8 = null_mut();
         let mut entriesread: u32 = 0;
         let mut totalentries: u32 = 0;
 
         let status = unsafe {
             NetShareEnum(
-                PCWSTR(server_w.as_ptr()),
+                server_ptr,
                 1, // Information level 1: Get ShareInfo
                 &mut buf,
                 u32::MAX, // MAX_PREFERRED_LENGTH
@@ -202,14 +271,27 @@ impl SmbShare {
         Ok(share_names)
     }
 
-    /// Connects to the SMB share using UNC path
+    /// Connects to the SMB share using UNC path (disk resource type).
     ///
     /// # Returns
     /// * `Ok(())` - Connection successful
     /// * `Err(Error)` - Connection failed with specific error
     pub fn connect_unc(&self) -> Result<()> {
+        self.connect_unc_with_type(WNet::RESOURCETYPE_DISK)
+    }
+
+    /// Connects to the SMB share using UNC path with a specific resource type.
+    ///
+    /// # Arguments
+    /// * `resource_type` - Type of network resource, e.g. `RESOURCETYPE_DISK`
+    ///   or `RESOURCETYPE_PRINT`.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Connection successful
+    /// * `Err(Error)` - Connection failed with specific error
+    pub fn connect_unc_with_type(&self, resource_type: WNet::NET_RESOURCE_TYPE) -> Result<()> {
         // Prepare optional local name as wide string
-        let local_name_buf = self.driver.map(|ln| to_wide(format!("{ln}:").as_str()));
+        let local_name_buf = self.driver.map(|ln| to_wide(format!("{ln}:")));
         let local_name = local_name_buf
             .as_ref()
             .map_or(std::ptr::null_mut(), |v| v.as_ptr().cast_mut());
@@ -235,7 +317,7 @@ impl SmbShare {
         let mut netresourcew = NETRESOURCEW {
             dwDisplayType: 0,                     // ignored by WNetAddConnection2W
             dwScope: WNet::NET_RESOURCE_SCOPE(0), // ignored by WNetAddConnection2W
-            dwType: WNet::RESOURCETYPE_DISK,
+            dwType: resource_type,
             dwUsage: 0, // ignored by WNetAddConnection2W
             lpLocalName: PWSTR(local_name),
             lpRemoteName: PWSTR(share_w.as_ptr().cast_mut()),
@@ -259,6 +341,11 @@ impl SmbShare {
                 flags,
             )
         };
+
+        if connection_result == ERROR_EXTENDED_ERROR {
+            let extended_info = get_extended_error_info();
+            return Err(Error::ExtendedError(extended_info));
+        }
 
         map_win32_error(connection_result)
     }
@@ -287,6 +374,11 @@ impl SmbShare {
                 true, // Force disconnect
             )
         };
+
+        if disconnect_result == ERROR_EXTENDED_ERROR {
+            let extended_info = get_extended_error_info();
+            return Err(Error::ExtendedError(extended_info));
+        }
 
         if disconnect_result != WIN32_ERROR(0) {
             return map_win32_error(disconnect_result);
@@ -332,6 +424,8 @@ impl SmbShare {
 
         loop {
             let mut count = u32::MAX;
+            // Reset buffer_size to actual buffer capacity before each call
+            buffer_size = buffer.len() as u32;
 
             let enum_result = unsafe {
                 WNet::WNetEnumResourceW(
@@ -359,13 +453,13 @@ impl SmbShare {
                             let local_name = if resource.lpLocalName.is_null() {
                                 String::new()
                             } else {
-                                wide_to_string(resource.lpLocalName.0 as *mut u16)
+                                wide_to_string(resource.lpLocalName.0)
                             };
 
                             let remote_name = if resource.lpRemoteName.is_null() {
                                 String::new()
                             } else {
-                                wide_to_string(resource.lpRemoteName.0 as *mut u16)
+                                wide_to_string(resource.lpRemoteName.0)
                             };
 
                             type_buf.clear();
@@ -388,7 +482,7 @@ impl SmbShare {
                             let provider_name = if resource.lpProvider.is_null() {
                                 String::new()
                             } else {
-                                wide_to_string(resource.lpProvider.0 as *mut u16)
+                                wide_to_string(resource.lpProvider.0)
                             };
 
                             // Only add connections that are actually connected
@@ -407,8 +501,15 @@ impl SmbShare {
                     break; // No more items
                 }
                 error_code if error_code == ERROR_MORE_DATA.0 => {
-                    // Buffer too small, resize and try again
-                    buffer_size = buffer_size * 2;
+                    // Buffer too small — Windows has set buffer_size to the
+                    // required size.  Cap it to avoid runaway allocation.
+                    if buffer_size > 16 * 1024 * 1024 {
+                        // Safety limit: 16 MiB
+                        unsafe {
+                            let _ = WNet::WNetCloseEnum(enum_handle);
+                        }
+                        return Err(Error::Other(ERROR_MORE_DATA.0));
+                    }
                     buffer = vec![0; buffer_size as usize];
                     continue;
                 }
@@ -503,22 +604,22 @@ mod tests {
     #[test]
     fn test_wide_to_string() {
         // Test with null pointer (should return empty string)
-        let result = unsafe { wide_to_string(std::ptr::null_mut()) };
+        let result = unsafe { wide_to_string(std::ptr::null()) };
         assert_eq!(result, "");
 
         // Test with valid UTF-16 data
         let wide_data: Vec<u16> = vec![116, 101, 115, 116, 0]; // "test"
-        let result = unsafe { wide_to_string(wide_data.as_ptr() as *mut u16) };
+        let result = unsafe { wide_to_string(wide_data.as_ptr()) };
         assert_eq!(result, "test");
 
         // Test with empty string
         let wide_empty: Vec<u16> = vec![0];
-        let result = unsafe { wide_to_string(wide_empty.as_ptr() as *mut u16) };
+        let result = unsafe { wide_to_string(wide_empty.as_ptr()) };
         assert_eq!(result, "");
 
         // Test with Unicode
         let wide_unicode: Vec<u16> = vec![0xD83C, 0xDF89, 0]; // "🎉"
-        let result = unsafe { wide_to_string(wide_unicode.as_ptr() as *mut u16) };
+        let result = unsafe { wide_to_string(wide_unicode.as_ptr()) };
         assert_eq!(result, "🎉");
     }
 
@@ -585,7 +686,7 @@ mod tests {
         );
         assert_eq!(
             map_win32_error(ERROR_EXTENDED_ERROR).unwrap_err(),
-            Error::ExtendedError
+            Error::ExtendedError(String::new())
         );
         assert_eq!(
             map_win32_error(ERROR_INVALID_ADDRESS).unwrap_err(),
@@ -627,7 +728,7 @@ mod tests {
         // Test unknown error code
         assert_eq!(
             map_win32_error(WIN32_ERROR(9999)).unwrap_err(),
-            Error::Other
+            Error::Other(9999)
         );
     }
 
@@ -683,11 +784,12 @@ mod tests {
             false,
         );
 
-        // Test that Debug trait works
+        // Test that Debug trait works and password is masked
         let debug_output = format!("{:?}", smb);
         assert!(debug_output.contains("server"));
         assert!(debug_output.contains("share"));
-        // Note: passwords are not printed in Debug output for security
+        assert!(debug_output.contains("***")); // password is masked
+        assert!(!debug_output.contains("\"pass\"")); // real password value not exposed
     }
 
     #[test]
@@ -715,7 +817,7 @@ mod tests {
                 // Verify it's a valid error type
                 assert!(matches!(
                     e,
-                    Error::AccessDenied | Error::BadNetName | Error::NoNetwork | Error::Other
+                    Error::AccessDenied | Error::BadNetName | Error::NoNetwork | Error::Other(_)
                 ));
             }
         }
@@ -747,7 +849,7 @@ mod tests {
                     | Error::NoNetwork
                     | Error::LogonFailure
                     | Error::InvalidParameter
-                    | Error::Other
+                    | Error::Other(_)
             ));
         } else {
             // Connection succeeded, so we should disconnect
